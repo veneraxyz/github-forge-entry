@@ -370,6 +370,16 @@ export function readPack(pack: Buffer, options: { resolveBase?: ObjectLookup } =
   if (offset !== trailerStart) throw new Error(`pack has ${trailerStart - offset} stray bytes before its trailer`);
 
   const objects = new Map<string, GitObject>();
+  // Fast path: no delta entries (the suite's packs never carry deltas) — hash each entry
+  // directly instead of running the recursive resolver with its bookkeeping maps.
+  if (!raw.some((entry) => entry.typeCode === 6 || entry.typeCode === 7)) {
+    for (const entry of raw) {
+      const type = CODE_TYPE[entry.typeCode]!;
+      const oid = hashObject(type, entry.data);
+      if (!objects.has(oid)) objects.set(oid, { type, data: entry.data });
+    }
+    return objects;
+  }
   const resolving = new Set<number>();
   const resolvedByOid = new Map<string, RawEntry>();
 
@@ -453,8 +463,13 @@ export function writePack(objects: Iterable<GitObject>): Buffer {
   parts.push(header);
   for (const object of list) {
     parts.push(writePackObjectHeader(object.type, object.data.length));
-    parts.push(deflateSync(object.data));
+    // Level 1: at these sizes the deflate setup dominates, so level 1 costs the same as
+    // level 6 while still compressing the word-salad blobs ~20x (level 0 would not).
+    parts.push(deflateSync(object.data, { level: 1 }));
   }
-  const body = Buffer.concat(parts);
-  return Buffer.concat([body, createHash('sha1').update(body).digest()]);
+  // Hash the parts directly and concat once, instead of concating the body twice.
+  const hash = createHash('sha1');
+  for (const part of parts) hash.update(part);
+  parts.push(hash.digest());
+  return Buffer.concat(parts);
 }
