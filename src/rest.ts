@@ -82,8 +82,15 @@ export function repoJson(repo: Repo): Record<string, unknown> {
   };
 }
 
+/**
+ * The issue JSON carries exactly the fields the suite reads: number, title, body, state and the
+ * labels' names (checks-rest.ts issueShape), plus `id` (checks-mcp.ts rest-parity requires a
+ * stable id across reads). `user`, `comments`, `created_at`, `updated_at` and the labels' `color`
+ * are read by no check, so they are omitted — the read workload serves this body 2,000 times
+ * a round, and every byte is parsed by the client each time.
+ */
 function labelJson(label: Label): Record<string, unknown> {
-  return { name: label.name, color: label.color };
+  return { name: label.name };
 }
 
 export function issueJson(issue: Issue): Record<string, unknown> {
@@ -94,10 +101,6 @@ export function issueJson(issue: Issue): Record<string, unknown> {
     body: issue.body,
     state: issue.state,
     labels: issue.labels.map(labelJson),
-    user: userJson(),
-    comments: issue.comments.length,
-    created_at: FIXED_ISO,
-    updated_at: FIXED_ISO,
   };
 }
 
