@@ -38,8 +38,8 @@ export interface RestContext {
 
 export interface RestResult {
   status: number;
-  /** Serialized JSON body (null for a 204). */
-  body: string | null;
+  /** Serialized JSON body (null for a 204). Cached bodies arrive pre-encoded as Buffers. */
+  body: string | Buffer | null;
   headers?: Record<string, string>;
 }
 
@@ -298,7 +298,7 @@ function handleRepoRoute(ctx: RestContext, owner: string, name: string, tail: st
 
   if (tail.length === 0) {
     if (method === 'GET') {
-      if (repo.jsonCache === null) repo.jsonCache = JSON.stringify(repoJson(repo));
+      if (repo.jsonCache === null) repo.jsonCache = Buffer.from(JSON.stringify(repoJson(repo)), 'utf8');
       return { status: 200, body: repo.jsonCache };
     }
     if (method === 'PATCH') {
@@ -354,7 +354,7 @@ function listBranches(repo: Repo): RestResult {
       .filter((r) => r.startsWith('refs/heads/'))
       .sort()
       .map((ref) => ({ name: ref.slice('refs/heads/'.length), commit: { sha: repo.refs.get(ref)! } }));
-    repo.branchesCache = JSON.stringify(branches);
+    repo.branchesCache = Buffer.from(JSON.stringify(branches), 'utf8');
   }
   return { status: 200, body: repo.branchesCache };
 }
@@ -395,6 +395,7 @@ function createRef(ctx: RestContext, repo: Repo): RestResult {
   }
   repo.refs.set(ref, sha);
   repo.branchesCache = null;
+  repo.refsVersion += 1;
   return ok({ ref, object: { sha, type: object.type } }, 201);
 }
 
@@ -581,7 +582,7 @@ function handleIssues(ctx: RestContext, repo: Repo, sub: string[]): RestResult {
   if (!issue) return err(404, `Issue #${number} not found`);
   if (sub.length === 1) {
     if (method === 'GET') {
-      if (issue.jsonCache === null) issue.jsonCache = JSON.stringify(issueJson(issue));
+      if (issue.jsonCache === null) issue.jsonCache = Buffer.from(JSON.stringify(issueJson(issue)), 'utf8');
       return { status: 200, body: issue.jsonCache };
     }
     if (method === 'PATCH') return patchIssue(ctx, repo, issue);
