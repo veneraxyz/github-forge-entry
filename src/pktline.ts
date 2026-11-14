@@ -9,15 +9,29 @@ export type Pkt =
   | { kind: 'delim' }
   | { kind: 'response-end' };
 
-const HEX4 = /^[0-9a-fA-F]{4}$/;
+/** Parse a 4-byte hex pkt-line length header directly from the buffer (no regex/parseInt). */
+function readPktLength(bytes: Buffer, offset: number): number {
+  let length = 0;
+  for (let i = 0; i < 4; i += 1) {
+    const c = bytes[offset + i]!;
+    let nibble: number;
+    if (c >= 48 && c <= 57) nibble = c - 48; // 0-9
+    else if (c >= 97 && c <= 102) nibble = c - 87; // a-f
+    else if (c >= 65 && c <= 70) nibble = c - 55; // A-F
+    else throw new Error(`invalid pkt-line length ${JSON.stringify(bytes.subarray(offset, offset + 4).toString('ascii'))}`);
+    length = length * 16 + nibble;
+  }
+  return length;
+}
 
 /** Encode one data packet: 4 hex length bytes (payload + 4) then the payload. */
 export function pktLine(payload: string | Buffer): Buffer {
   const data = typeof payload === 'string' ? Buffer.from(payload, 'utf8') : payload;
   if (data.length > PKT_LINE_MAX_PAYLOAD) throw new Error(`pkt-line payload ${data.length} exceeds ${PKT_LINE_MAX_PAYLOAD}`);
-  const header = Buffer.allocUnsafe(4);
-  header.write((data.length + 4).toString(16).padStart(4, '0'), 0, 4, 'ascii');
-  return Buffer.concat([header, data]);
+  const packet = Buffer.allocUnsafe(data.length + 4);
+  packet.write((data.length + 4).toString(16).padStart(4, '0'), 0, 4, 'ascii');
+  data.copy(packet, 4);
+  return packet;
 }
 
 export const PKT_FLUSH = Buffer.from('0000', 'ascii');
@@ -46,9 +60,7 @@ export function decodePktLines(bytes: Buffer): { packets: Pkt[]; consumed: numbe
   let offset = 0;
   while (offset < bytes.length) {
     if (offset + 4 > bytes.length) throw new Error(`truncated pkt-line: ${bytes.length - offset} trailing byte(s)`);
-    const header = bytes.subarray(offset, offset + 4).toString('ascii');
-    if (!HEX4.test(header)) throw new Error(`invalid pkt-line length ${JSON.stringify(header)}`);
-    const length = parseInt(header, 16);
+    const length = readPktLength(bytes, offset);
     if (length === 0) {
       packets.push({ kind: 'flush' });
       offset += 4;
@@ -82,9 +94,7 @@ export function decodeUntilFlush(bytes: Buffer): { packets: Pkt[]; consumed: num
   let offset = 0;
   while (offset < bytes.length) {
     if (offset + 4 > bytes.length) throw new Error(`truncated pkt-line: ${bytes.length - offset} trailing byte(s)`);
-    const header = bytes.subarray(offset, offset + 4).toString('ascii');
-    if (!HEX4.test(header)) throw new Error(`invalid pkt-line length ${JSON.stringify(header)}`);
-    const length = parseInt(header, 16);
+    const length = readPktLength(bytes, offset);
     if (length === 0) return { packets, consumed: offset + 4 };
     if (length === 1) {
       packets.push({ kind: 'delim' });
@@ -116,8 +126,12 @@ export function sidebandPack(pack: Buffer, chunk = 65500): Buffer[] {
   const out: Buffer[] = [];
   for (let offset = 0; offset < pack.length; offset += chunk) {
     const slice = pack.subarray(offset, Math.min(pack.length, offset + chunk));
-    const payload = Buffer.concat([Buffer.from([1]), slice]);
-    out.push(pktLine(payload));
+    // One allocation per packet: 4-byte header + band byte + slice (pktLine would concat twice).
+    const packet = Buffer.allocUnsafe(slice.length + 5);
+    packet.write((slice.length + 5).toString(16).padStart(4, '0'), 0, 4, 'ascii');
+    packet[4] = 1;
+    slice.copy(packet, 5);
+    out.push(packet);
   }
   if (out.length === 0) out.push(pktLine(Buffer.from([1])));
   return out;
