@@ -122,12 +122,18 @@ async function handleRequest(forge: Forge, expectedAuth: string | null, req: Inc
 
   // Decode the path segments (a bad escape is a 400, not a crash). Segments without a
   // '%' cannot contain an escape, so they skip decodeURIComponent (hot-path saving).
+  // Fast path: no escapes, no empty segments, no trailing slash — split and drop the
+  // leading empty piece directly instead of filter+map.
   let segments: string[];
   try {
-    segments = rawPath
-      .split('/')
-      .filter((s) => s !== '')
-      .map((s) => (s.includes('%') ? decodeURIComponent(s) : s));
+    if (rawPath.length > 1 && !rawPath.endsWith('/') && !rawPath.includes('//') && !rawPath.includes('%')) {
+      segments = rawPath.split('/').slice(1);
+    } else {
+      segments = rawPath
+        .split('/')
+        .filter((s) => s !== '')
+        .map((s) => (s.includes('%') ? decodeURIComponent(s) : s));
+    }
   } catch {
     sendJson(res, forge, 400, { message: 'Bad path encoding' });
     return;
@@ -201,7 +207,9 @@ async function handleRestRequest(
     return;
   }
   headers['content-type'] = 'application/json';
-  headers['content-length'] = String(Buffer.byteLength(result.body, 'utf8'));
+  // Cached bodies arrive pre-encoded as Buffers: skip the UTF-8 byte-length scan and the
+  // string-to-bytes conversion on write (the read workload serves the same issue 2,000x).
+  headers['content-length'] = String(typeof result.body === 'string' ? Buffer.byteLength(result.body, 'utf8') : result.body.length);
   res.writeHead(result.status, headers);
   res.end(result.body);
 }
