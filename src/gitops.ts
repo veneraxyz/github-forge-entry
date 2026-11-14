@@ -475,6 +475,7 @@ export function createCommit(repo: Repo, treeOid: string, parents: readonly stri
 export function setBranch(repo: Repo, branch: string, oid: string): void {
   repo.refs.set(`refs/heads/${branch}`, oid);
   repo.branchesCache = null;
+  repo.refsVersion += 1;
 }
 
 // ---------------------------------------------------------------------------------------------
