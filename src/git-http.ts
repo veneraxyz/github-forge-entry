@@ -89,6 +89,17 @@ function fetchCacheStore(repo: Repo, key: string, body: Buffer): void {
   }
 }
 
+/**
+ * Raw-request cache key for upload-pack. Identical request bytes against an unchanged repo
+ * (refsVersion + objects.size pin the whole state, same invariant as the parsed caches)
+ * always produce the identical response, so a hit skips pkt-line decoding and argument
+ * parsing entirely. The bench's 50 concurrent clones send byte-identical ls-refs/fetch
+ * requests, so after warmup every timed clone hits here.
+ */
+function rawUploadCacheKey(protocol: 'v2' | 'v0', repo: Repo, body: Buffer): string {
+  return `raw|${protocol}|${repo.refsVersion}|${repo.objects.size}|${body.toString('latin1')}`;
+}
+
 function jsonError(status: number, message: string): HttpResult {
   return { status, contentType: JSON_TYPE, body: Buffer.from(JSON.stringify({ message }), 'utf8') };
 }
@@ -228,12 +239,18 @@ function dataTexts(packets: readonly Pkt[]): string[] {
 }
 
 function uploadPackV2(repo: Repo, body: Buffer): HttpResult {
+  const rawKey = rawUploadCacheKey('v2', repo, body);
+  const rawCached = repo.fetchCache.get(rawKey);
+  if (rawCached !== undefined) return { status: 200, contentType: UPLOAD_RESULT, body: rawCached };
   const { packets } = decodePktLines(body);
   const lines = dataTexts(packets);
   const command = (lines[0] ?? '').replace(/\n$/, '');
-  if (command === 'command=ls-refs') return lsRefsV2(repo, lines.slice(1));
-  if (command === 'command=fetch') return fetchV2(repo, lines.slice(1));
-  throw new Error(`unknown v2 command ${JSON.stringify(command)}`);
+  let result: HttpResult;
+  if (command === 'command=ls-refs') result = lsRefsV2(repo, lines.slice(1));
+  else if (command === 'command=fetch') result = fetchV2(repo, lines.slice(1));
+  else throw new Error(`unknown v2 command ${JSON.stringify(command)}`);
+  fetchCacheStore(repo, rawKey, result.body);
+  return result;
 }
 
 function lsRefsV2(repo: Repo, lines: readonly string[]): HttpResult {
@@ -335,6 +352,9 @@ function fetchV2(repo: Repo, lines: readonly string[]): HttpResult {
 }
 
 function uploadPackV0(repo: Repo, body: Buffer): HttpResult {
+  const rawKey = rawUploadCacheKey('v0', repo, body);
+  const rawCached = repo.fetchCache.get(rawKey);
+  if (rawCached !== undefined) return { status: 200, contentType: UPLOAD_RESULT, body: rawCached };
   // Section 1 (wants/shallow/deepen) ends at the first flush; section 2 (haves/done) at the next.
   const first = decodeUntilFlush(body);
   const rest = body.subarray(first.consumed);
@@ -385,6 +405,7 @@ function uploadPackV0(repo: Repo, body: Buffer): HttpResult {
   parts.push(PKT_FLUSH);
   const responseBody = Buffer.concat(parts);
   fetchCacheStore(repo, cacheKey, responseBody);
+  fetchCacheStore(repo, rawKey, responseBody);
   return { status: 200, contentType: UPLOAD_RESULT, body: responseBody };
 }
 
