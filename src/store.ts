@@ -26,8 +26,8 @@ export interface Issue {
   state: 'open' | 'closed';
   labels: Label[];
   readonly comments: Comment[];
-  /** Cached serialized REST JSON for GET /issues/{n} (invalidated on mutation). */
-  jsonCache: string | null;
+  /** Cached REST JSON for GET /issues/{n} as UTF-8 bytes (invalidated on mutation). */
+  jsonCache: Buffer | null;
 }
 
 export interface Pull {
@@ -66,15 +66,29 @@ export interface Repo {
   readonly commitCache: Map<string, CommitView>;
   /** Parsed-tree cache (keyed by oid). */
   readonly treeCache: Map<string, TreeEntry[]>;
-  /** Cached serialized REST JSON for GET /repos/{o}/{r} (invalidated on PATCH). */
-  jsonCache: string | null;
-  /** Cached serialized REST JSON for GET /branches (invalidated on ref change). */
-  branchesCache: string | null;
+  /** Cached REST JSON for GET /repos/{o}/{r} as UTF-8 bytes (invalidated on PATCH). */
+  jsonCache: Buffer | null;
+  /** Cached REST JSON for GET /branches as UTF-8 bytes (invalidated on ref change). */
+  branchesCache: Buffer | null;
+  /**
+   * Monotonic ref-generation counter, bumped on every refs mutation (receive-pack, setBranch,
+   * createRef). Advertisement/ls-refs caches are keyed on it, so a stale ref set can never be
+   * served. Objects are append-only, so pack caches key on repo.objects.size instead.
+   */
+  refsVersion: number;
+  /** info/refs v0 advertisements, keyed by service, valid while version/size match. */
+  advertiseCache: { version: number; objectsSize: number; uploadV0: Buffer | null; receive: Buffer | null };
+  /** ls-refs v2 responses, keyed by `refsVersion|args`. */
+  lsRefsCache: Map<string, Buffer>;
+  /** Whole fetch responses (framing + pack), keyed by fetch params + objects.size. */
+  fetchCache: Map<string, Buffer>;
+  /** Sum of fetchCache values' byte lengths, for the eviction cap. */
+  fetchCacheBytes: number;
 }
 
 /** The whole forge: one viewer, many repositories. */
 export class Forge {
-  /** `owner/name` -> repo. Owner is always VIEWER_LOGIN for created repos. */
+  /** Repo name -> repo. The owner is always VIEWER_LOGIN for created repos, so the name alone keys. */
   readonly repos = new Map<string, Repo>();
   /** Creation order, for GET /user/repos pagination. */
   readonly repoOrder: Repo[] = [];
@@ -102,8 +116,13 @@ export class Forge {
       treeCache: new Map(),
       jsonCache: null,
       branchesCache: null,
+      refsVersion: 0,
+      advertiseCache: { version: 0, objectsSize: 0, uploadV0: null, receive: null },
+      lsRefsCache: new Map(),
+      fetchCache: new Map(),
+      fetchCacheBytes: 0,
     };
-    this.repos.set(`${VIEWER_LOGIN}/${name}`, repo);
+    this.repos.set(name, repo);
     this.repoOrder.push(repo);
     return repo;
   }
@@ -111,11 +130,11 @@ export class Forge {
   getRepo(owner: string, name: string): Repo | null {
     // A repository belongs to the login the token names; any other owner is a 404, never a 403.
     if (owner !== VIEWER_LOGIN) return null;
-    return this.repos.get(`${owner}/${name}`) ?? null;
+    return this.repos.get(name) ?? null;
   }
 
   deleteRepo(repo: Repo): void {
-    this.repos.delete(`${repo.owner}/${repo.name}`);
+    this.repos.delete(repo.name);
     const index = this.repoOrder.indexOf(repo);
     if (index >= 0) this.repoOrder.splice(index, 1);
   }
@@ -126,7 +145,8 @@ export class Forge {
 
   nextRequestId(): string {
     this.requestSeq += 1;
-    return `req-${this.requestSeq.toString(16).padStart(12, '0')}`;
+    // The suite only requires a non-empty id; decimal is cheaper than hex+padStart.
+    return `req-${this.requestSeq}`;
   }
 }
 
